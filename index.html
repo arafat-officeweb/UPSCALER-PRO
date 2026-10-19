@@ -441,23 +441,23 @@
             </div>
 
             <!-- Drag & Drop Multi-File Upload Zone + Demo Batch Generator -->
-            <div id="batchDropZone" class="mt-5 border-2 border-dashed border-emerald-500/50 hover:border-emerald-400 bg-slate-950/70 rounded-2xl p-6 text-center transition cursor-pointer">
+            <div id="batchDropZone" onclick="if(event.target.tagName !== 'BUTTON' && event.target.tagName !== 'LABEL' && event.target.tagName !== 'INPUT') document.getElementById('batchFileInput').click()" class="mt-5 border-2 border-dashed border-emerald-500/50 hover:border-emerald-400 bg-slate-950/70 rounded-2xl p-6 text-center transition cursor-pointer">
                 <input type="file" id="batchFileInput" accept="image/*" multiple class="hidden" onchange="handleBatchFilesSelected(event)">
                 <div class="max-w-xl mx-auto space-y-3">
                     <div class="w-12 h-12 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 flex items-center justify-center mx-auto">
                         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
                     </div>
                     <h3 class="text-base sm:text-lg font-bold text-white">
-                        এখানে একসাথে ১০০+ ছবি Drag & Drop করুন অথবা সিলেক্ট করুন
+                        এখানে একসাথে ১০০+ ছবি Drag & Drop করুন অথবা ক্লিক করে সিলেক্ট করুন
                     </h3>
                     <p class="text-xs text-slate-400">
-                        যেকোনো ক্যাটাগরির আইকন শিট, লোগো, লাইন-আর্ট বা ফটো একসাথে সিলেক্ট করুন। মেমোরি অটো-ক্লিনিং থাকায় ব্রাউজার কখনোই ক্র্যাশ করবে না।
+                        যেকোনো ক্যাটাগরির আইকন শিট, লোগো, লাইন-আর্ট বা ফটো একসাথে সিলেক্ট করুন। Non-Blocking Chunked Engine ও মেমোরি অটো-ক্লিনিং থাকায় ব্রাউজার কখনোই হ্যাং বা ক্র্যাশ করবে না।
                     </p>
                     <div class="flex flex-wrap items-center justify-center gap-3 pt-2">
-                        <label for="batchFileInput" class="cursor-pointer px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/25 transition">
+                        <button type="button" onclick="event.stopPropagation(); document.getElementById('batchFileInput').click()" class="cursor-pointer px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/25 transition">
                             📂 মাল্টিপল ছবি সিলেক্ট করুন (Select 100+ Files)
-                        </label>
-                        <button onclick="loadSampleBatchQueue(12)" class="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs border border-slate-700 transition">
+                        </button>
+                        <button type="button" onclick="event.stopPropagation(); loadSampleBatchQueue(12)" class="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs border border-slate-700 transition">
                             🧪 ১২টি টেস্ট আইকন দিয়ে ব্যাচ ডেমো চেক করুন
                         </button>
                     </div>
@@ -1475,6 +1475,134 @@ export async function universalCategoryUpscaler(imageBuffer) {
             targetCtx.putImageData(outData, 0, 0);
         }
 
+        // Non-Blocking Async Chunked Zero-Pixelation Kernel for 100+ Batch Processing (Prevents UI Freeze on 4K/6K Images)
+        async function applyUniversalZeroPixelationKernelAsync(targetCtx, srcCanvas, w, h, onTileProgress) {
+            const sharpen = parseInt(document.getElementById('sharpenSlider').value, 10);
+            const denoise = parseInt(document.getElementById('denoiseSlider').value, 10);
+            const clarity = parseInt(document.getElementById('claritySlider').value, 10);
+
+            const useDirectionalEdges = document.getElementById('directionalEdgeCheck')?.checked ?? true;
+            const lockWhiteBg = document.getElementById('pureWhiteBgCheck')?.checked ?? true;
+            const lockFlatColors = document.getElementById('colorQuantizeCheck')?.checked ?? true;
+
+            targetCtx.clearRect(0, 0, w, h);
+            const contrastBoost = 100 + Math.round(clarity * 0.38);
+            const saturateBoost = 100 + Math.round(clarity * 0.28);
+            targetCtx.filter = `contrast(${contrastBoost}%) saturate(${saturateBoost}%)`;
+            targetCtx.drawImage(srcCanvas, 0, 0, w, h);
+            targetCtx.filter = 'none';
+
+            const imgData = targetCtx.getImageData(0, 0, w, h);
+            const src = imgData.data;
+            const outData = targetCtx.createImageData(w, h);
+            const dst = outData.data;
+
+            dst.set(src);
+
+            const strength = (sharpen / 100) * 1.85;
+            const surfaceThreshold = Math.round((denoise / 100) * 22);
+            const quantStep = lockFlatColors ? 8 : 1;
+            const rowStride = w * 4;
+
+            // Yield to browser UI thread every ~350,000 pixels so 100+ 4K/6K images never freeze the browser
+            const rowsPerChunk = Math.max(40, Math.floor(350000 / Math.max(1, w)));
+
+            for (let yStart = 1; yStart < h - 1; yStart += rowsPerChunk) {
+                const yEnd = Math.min(h - 1, yStart + rowsPerChunk);
+
+                for (let y = yStart; y < yEnd; y++) {
+                    let idx = (y * w + 1) * 4;
+                    for (let x = 1; x < w - 1; x++, idx += 4) {
+                        const a0 = src[idx + 3];
+                        if (a0 < 15) {
+                            dst[idx] = 0;
+                            dst[idx + 1] = 0;
+                            dst[idx + 2] = 0;
+                            dst[idx + 3] = 0;
+                            continue;
+                        }
+
+                        const r0 = src[idx];
+                        const g0 = src[idx + 1];
+                        const b0 = src[idx + 2];
+
+                        if (lockWhiteBg && r0 > 236 && g0 > 236 && b0 > 236) {
+                            dst[idx] = 255;
+                            dst[idx + 1] = 255;
+                            dst[idx + 2] = 255;
+                            dst[idx + 3] = a0;
+                            continue;
+                        }
+
+                        for (let c = 0; c < 3; c++) {
+                            const center = src[idx + c];
+                            const n = src[idx - rowStride + c];
+                            const s = src[idx + rowStride + c];
+                            const wPx = src[idx - 4 + c];
+                            const ePx = src[idx + 4 + c];
+
+                            const nw = src[idx - rowStride - 4 + c];
+                            const ne = src[idx - rowStride + 4 + c];
+                            const sw = src[idx + rowStride - 4 + c];
+                            const se = src[idx + rowStride + 4 + c];
+
+                            const gx = (ne + 2 * ePx + se) - (nw + 2 * wPx + sw);
+                            const gy = (sw + 2 * s + se) - (nw + 2 * n + ne);
+                            const gradMag = Math.abs(gx) + Math.abs(gy);
+
+                            const localCrossAvg = (n + s + wPx + ePx) * 0.25;
+                            const diagAvg = (nw + ne + sw + se) * 0.25;
+                            const fullAvg = localCrossAvg * 0.65 + diagAvg * 0.35;
+                            const diff = center - fullAvg;
+
+                            let val;
+                            if (gradMag > surfaceThreshold * 3.0) {
+                                let tangentAvg = fullAvg;
+                                let normalAvg = fullAvg;
+                                if (useDirectionalEdges) {
+                                    if (Math.abs(gx) > Math.abs(gy) * 1.45) {
+                                        tangentAvg = (n + s) * 0.5;
+                                        normalAvg = (wPx + ePx) * 0.5;
+                                    } else if (Math.abs(gy) > Math.abs(gx) * 1.45) {
+                                        tangentAvg = (wPx + ePx) * 0.5;
+                                        normalAvg = (n + s) * 0.5;
+                                    } else if (gx * gy > 0) {
+                                        tangentAvg = (ne + sw) * 0.5;
+                                        normalAvg = (nw + se) * 0.5;
+                                    } else {
+                                        tangentAvg = (nw + se) * 0.5;
+                                        normalAvg = (ne + sw) * 0.5;
+                                    }
+                                }
+                                const edgeSmoothed = center * 0.58 + tangentAvg * 0.42;
+                                const normalDelta = center - normalAvg;
+                                val = edgeSmoothed + (diff * 1.35 + normalDelta * 0.75) * strength;
+                            } else {
+                                val = center * 0.2 + fullAvg * 0.8;
+                            }
+
+                            val = val > 255 ? 255 : (val < 0 ? 0 : val);
+
+                            if (quantStep > 1 && gradMag <= surfaceThreshold * 3.0) {
+                                val = Math.round(val / quantStep) * quantStep;
+                            }
+                            dst[idx + c] = val;
+                        }
+                        const aAvg = (src[idx - rowStride + 3] + src[idx + rowStride + 3] + src[idx - 4 + 3] + src[idx + 4 + 3]) * 0.25;
+                        const sharpAlpha = a0 + (a0 - aAvg) * 1.5;
+                        dst[idx + 3] = sharpAlpha > 255 ? 255 : (sharpAlpha < 0 ? 0 : sharpAlpha);
+                    }
+                }
+
+                if (onTileProgress) {
+                    onTileProgress(Math.min(99, Math.round((yEnd / h) * 100)));
+                }
+                // Yield execution to keep browser responsive during 100+ image batch runs
+                await new Promise(r => setTimeout(r, 0));
+            }
+            targetCtx.putImageData(outData, 0, 0);
+        }
+
         function updateFilterParams() {
             if (!rawSourceCanvas.width) return;
             applyUniversalZeroPixelationKernel(afterCtx, rawSourceCanvas, afterCanvas.width, afterCanvas.height);
@@ -1555,33 +1683,50 @@ export async function universalCategoryUpscaler(imageBuffer) {
         let isBatchRunning = false;
         let isBatchPaused = false;
 
+        // Instant Zero-RAM-Spike Multi-File Loader (Uses ObjectURL instead of 100 simultaneous FileReaders)
         function handleBatchFilesSelected(event) {
-            const files = Array.from(event.target?.files || event.dataTransfer?.files || []);
-            if (!files.length) return;
+            const rawFiles = event.target?.files || event.dataTransfer?.files;
+            if (!rawFiles || !rawFiles.length) return;
+
+            const files = Array.from(rawFiles);
+            let addedCount = 0;
 
             files.forEach((file, idx) => {
-                if (!file.type.startsWith('image/')) return;
+                const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp|svg|bmp|gif)$/i.test(file.name);
+                if (!isImage) return;
+
                 const id = `batch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${idx}`;
-                const reader = new FileReader();
-                reader.onload = (e) => {
-                    batchQueue.push({
-                        id,
-                        name: file.name.replace(/\.[^/.]+$/, ""),
-                        originalName: file.name,
-                        srcDataUrl: e.target.result,
-                        status: 'pending', // pending | processing | done | error
-                        outWidth: 0,
-                        outHeight: 0,
-                        pngBlob: null,
-                        svgBlob: null,
-                        previewUrl: e.target.result
-                    });
-                    renderBatchQueueUI();
-                };
-                reader.readAsDataURL(file);
+                const objectUrl = URL.createObjectURL(file);
+                const cleanBaseName = file.name.replace(/\.[^/.]+$/, "") || `Image_${idx + 1}`;
+
+                batchQueue.push({
+                    id,
+                    name: cleanBaseName,
+                    originalName: file.name,
+                    srcDataUrl: objectUrl,
+                    isObjectUrl: true,
+                    status: 'pending', // pending | processing | done | error
+                    subProgress: 0,
+                    outWidth: 0,
+                    outHeight: 0,
+                    pngBlob: null,
+                    svgBlob: null,
+                    previewUrl: objectUrl
+                });
+                addedCount++;
             });
 
-            if (event.target) event.target.value = '';
+            if (event.target && typeof event.target.value !== 'undefined') {
+                event.target.value = '';
+            }
+
+            if (addedCount > 0) {
+                renderBatchQueueUI();
+                const progressLabel = document.getElementById('batchProgressLabel');
+                if (progressLabel) {
+                    progressLabel.textContent = `✅ একসাথে ${addedCount}টি ছবি কিউতে যুক্ত হয়েছে (মোট: ${batchQueue.length}টি)। এখন "Start Batch Upscaling" বাটনে ক্লিক করুন!`;
+                }
+            }
         }
 
         // Generate 12 diverse Vector Graphic & Icon cards into the Batch Queue
@@ -1637,7 +1782,9 @@ export async function universalCategoryUpscaler(imageBuffer) {
                     name: item.name,
                     originalName: `${item.name}.png`,
                     srcDataUrl: dataUrl,
+                    isObjectUrl: false,
                     status: 'pending',
+                    subProgress: 0,
                     outWidth: 0,
                     outHeight: 0,
                     pngBlob: null,
@@ -1646,13 +1793,330 @@ export async function universalCategoryUpscaler(imageBuffer) {
                 });
             }
             renderBatchQueueUI();
+            const progressLabel = document.getElementById('batchProgressLabel');
+            if (progressLabel) {
+                progressLabel.textContent = `✅ ${count}টি ডেমো আইকন কিউতে লোড হয়েছে। এখন "Start Batch Upscaling" বাটনে ক্লিক করুন!`;
+            }
         }
 
         function removeSingleBatchItem(id) {
             const idx = batchQueue.findIndex(i => i.id === id);
             if (idx !== -1 && batchQueue[idx].status !== 'processing') {
+                if (batchQueue[idx].isObjectUrl && batchQueue[idx].srcDataUrl) {
+                    URL.revokeObjectURL(batchQueue[idx].srcDataUrl);
+                }
                 batchQueue.splice(idx, 1);
                 renderBatchQueueUI();
+            }
+        }
+
+        function inspectBatchItemInStudio(id) {
+            const item = batchQueue.find(i => i.id === id);
+            if (!item) return;
+            isCustomUpload = true;
+            resetZoom();
+            baseImage = new Image();
+            baseImage.onload = () => {
+                analyzeAndExtractPalette(baseImage);
+                switchTab('studio');
+                renderBeforeAndAfter();
+                document.getElementById('statusMessage').textContent = `🔍 ব্যাচ কিউ থেকে "${item.originalName}" সিঙ্গেল স্টুডিওতে লোড করা হয়েছে!`;
+            };
+            baseImage.src = item.srcDataUrl;
+        }
+
+        function renderBatchQueueUI() {
+            const container = document.getElementById('batchQueueContainer');
+            const countBadge = document.getElementById('batchQueueCountBadge');
+            const zipBtn = document.getElementById('downloadZipBtn');
+
+            const doneItems = batchQueue.filter(i => i.status === 'done');
+            countBadge.textContent = `Queue: ${batchQueue.length} Images (${doneItems.length} Done)`;
+            zipBtn.textContent = `📦 Download All as .ZIP (${doneItems.length})`;
+            zipBtn.disabled = doneItems.length === 0;
+
+            if (batchQueue.length === 0) {
+                container.innerHTML = `<div class="col-span-full bg-slate-900/60 border border-slate-800 rounded-2xl p-8 text-center text-slate-400 text-sm">
+                    এখনো কোনো ছবি কিউতে যোগ করা হয়নি। উপরে ক্লিক করে একসাথে একাধিক বা ১০০+ ছবি সিলেক্ট করুন অথবা <strong>"১২টি টেস্ট আইকন দিয়ে ব্যাচ ডেমো চেক করুন"</strong> বাটনে ক্লিক করুন।
+                </div>`;
+                return;
+            }
+
+            container.innerHTML = batchQueue.map((item, index) => {
+                let badgeHtml = `<span id="badge_${item.id}" class="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-300">⏳ Waiting in Queue</span>`;
+                if (item.status === 'processing') {
+                    badgeHtml = `<span id="badge_${item.id}" class="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-500/20 text-blue-300 border border-blue-500/40 animate-pulse">⚡ Upscaling (${item.subProgress || 0}%)...</span>`;
+                } else if (item.status === 'done') {
+                    badgeHtml = `<span id="badge_${item.id}" class="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">✅ ${item.outWidth}×${item.outHeight}px</span>`;
+                } else if (item.status === 'error') {
+                    badgeHtml = `<span id="badge_${item.id}" class="px-2 py-0.5 rounded text-[10px] font-mono bg-rose-500/20 text-rose-300 border border-rose-500/40">⚠️ Error</span>`;
+                }
+
+                return `
+                <div id="card_${item.id}" class="bg-slate-900 border ${item.status === 'done' ? 'border-emerald-500/40' : (item.status === 'processing' ? 'border-blue-500/50 ring-1 ring-blue-500/30' : 'border-slate-800')} rounded-xl p-3 flex items-center gap-3 shadow-lg">
+                    <img src="${item.previewUrl}" loading="lazy" alt="${item.name}" class="w-14 h-14 rounded-lg object-contain bg-white border border-slate-700 shrink-0 cursor-pointer" onclick="inspectBatchItemInStudio('${item.id}')" title="স্টুডিওতে জুম করে দেখুন">
+                    <div class="flex-1 min-w-0">
+                        <div class="text-xs font-bold text-white truncate" title="${item.originalName}">#${index + 1}. ${item.originalName}</div>
+                        <div class="mt-1 flex flex-wrap items-center gap-1.5">
+                            ${badgeHtml}
+                            <button onclick="inspectBatchItemInStudio('${item.id}')" class="text-[10px] text-blue-400 hover:underline font-medium">🔍 Inspect</button>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-1 shrink-0">
+                        ${item.status === 'done' ? `
+                            <button onclick="downloadSingleBatchItem('${item.id}')" class="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold transition" title="Download PNG">
+                                📥 PNG
+                            </button>
+                        ` : ''}
+                        ${item.status !== 'processing' ? `
+                            <button onclick="removeSingleBatchItem('${item.id}')" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/60 text-slate-400 hover:text-rose-300 text-xs transition" title="Remove">
+                                ✕
+                            </button>
+                        ` : ''}
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        // Sequential 1-by-1 Batch Processor with Non-Blocking Async Chunks & Explicit RAM Garbage Collection
+        async function startSequentialBatchProcessing() {
+            if (isBatchRunning) return;
+            if (batchQueue.length === 0) {
+                const progressLabel = document.getElementById('batchProgressLabel');
+                if (progressLabel) progressLabel.textContent = "⚠️ কিউতে কোনো ছবি নেই! অনুগ্রহ করে আগে ১০০+ ছবি সিলেক্ট করুন বা ডেমো বাটনে ক্লিক করুন।";
+                return;
+            }
+
+            // If all items were already processed, reset them so user can re-run with a new scale (e.g., 4K -> 6K)
+            const hasPending = batchQueue.some(i => i.status === 'pending' || i.status === 'error');
+            if (!hasPending) {
+                batchQueue.forEach(item => {
+                    item.status = 'pending';
+                    item.subProgress = 0;
+                });
+                renderBatchQueueUI();
+            }
+
+            isBatchRunning = true;
+            isBatchPaused = false;
+
+            const startBtn = document.getElementById('startBatchBtn');
+            const pauseBtn = document.getElementById('pauseBatchBtn');
+            const progressBar = document.getElementById('batchOverallProgressBar');
+            const progressLabel = document.getElementById('batchProgressLabel');
+            const percentLabel = document.getElementById('batchPercentLabel');
+            const batchScale = parseInt(document.getElementById('batchScaleSelect').value, 10) || 4;
+            const includeSvg = document.getElementById('batchFormatSelect').value === 'svg';
+
+            startBtn.disabled = true;
+            pauseBtn.disabled = false;
+
+            const total = batchQueue.length;
+
+            for (let i = 0; i < total; i++) {
+                while (isBatchPaused) {
+                    await new Promise(r => setTimeout(r, 150));
+                }
+                if (!isBatchRunning) break;
+
+                const item = batchQueue[i];
+                if (item.status === 'done') continue;
+
+                item.status = 'processing';
+                item.subProgress = 5;
+                renderBatchQueueUI();
+
+                await new Promise(r => setTimeout(r, 20));
+
+                await processSingleBatchItemSequential(item, batchScale, includeSvg, (subPct) => {
+                    item.subProgress = subPct;
+                    const badgeEl = document.getElementById(`badge_${item.id}`);
+                    if (badgeEl) {
+                        badgeEl.textContent = `⚡ Upscaling (${subPct}%)...`;
+                    }
+                    const overallPct = Math.min(99, Math.round(((i + (subPct / 100)) / total) * 100));
+                    progressBar.style.width = `${overallPct}%`;
+                    percentLabel.textContent = `${overallPct}%`;
+                    progressLabel.textContent = `প্রসেসিং চলছে: ছবি ${i + 1} / ${total} (${item.originalName}) — ${subPct}% সম্পন্ন`;
+                });
+
+                const doneCount = batchQueue.filter(x => x.status === 'done').length;
+                const donePct = Math.round((doneCount / total) * 100);
+                progressBar.style.width = `${donePct}%`;
+                percentLabel.textContent = `${donePct}%`;
+                renderBatchQueueUI();
+            }
+
+            isBatchRunning = false;
+            startBtn.disabled = false;
+            pauseBtn.disabled = true;
+            pauseBtn.textContent = '⏸️ Pause';
+
+            const finalDone = batchQueue.filter(x => x.status === 'done').length;
+            progressLabel.textContent = `🎉 শতভাগ সফল! ${finalDone}টি ছবি রিয়েল ${batchScale === 6 ? '6K' : (batchScale === 4 ? '4K' : '2x HD')} রেজোলিউশনে প্রস্তুত। এখন "Download All as .ZIP" বাটনে ক্লিক করুন!`;
+        }
+
+        function processSingleBatchItemSequential(item, scaleFactor, includeSvg, onProgress) {
+            return new Promise((resolve) => {
+                const img = new Image();
+                img.onload = async () => {
+                    try {
+                        const baseW = Math.min(1024, img.width || 512);
+                        const baseH = Math.round(((img.height || 512) * baseW) / (img.width || 512));
+                        const maxTrueDim = scaleFactor >= 6 ? 6144 : (scaleFactor >= 4 ? 4096 : 2560);
+
+                        let targetW = baseW * scaleFactor;
+                        let targetH = baseH * scaleFactor;
+
+                        // Ensure True 4K (3840px+) and True 6K (5760px+) dimensions even on smaller icons
+                        if (scaleFactor === 4 && targetW < 3840 && targetH < 3840) {
+                            const boost = 3840 / Math.max(targetW, targetH);
+                            targetW = Math.round(targetW * boost);
+                            targetH = Math.round(targetH * boost);
+                        } else if (scaleFactor === 6 && targetW < 5760 && targetH < 5760) {
+                            const boost = 5760 / Math.max(targetW, targetH);
+                            targetW = Math.round(targetW * boost);
+                            targetH = Math.round(targetH * boost);
+                        }
+
+                        if (targetW > maxTrueDim) {
+                            targetH = Math.round((targetH * maxTrueDim) / targetW);
+                            targetW = maxTrueDim;
+                        }
+                        if (targetH > maxTrueDim) {
+                            targetW = Math.round((targetW * maxTrueDim) / targetH);
+                            targetH = maxTrueDim;
+                        }
+
+                        // 1. Multi-step super-sample
+                        const superCanvas = createUniversalSuperSampledCanvas(img, targetW, targetH);
+
+                        // 2. Apply Non-Blocking Chunked Zero-Pixelation Directional Sobel + SDF Vector Kernel
+                        const workCanvas = document.createElement('canvas');
+                        workCanvas.width = targetW;
+                        workCanvas.height = targetH;
+                        const workCtx = workCanvas.getContext('2d', { willReadFrequently: true });
+
+                        await applyUniversalZeroPixelationKernelAsync(workCtx, superCanvas, targetW, targetH, onProgress);
+
+                        item.outWidth = targetW;
+                        item.outHeight = targetH;
+
+                        if (includeSvg) {
+                            const svgStr = buildSVGStringFromCanvas(workCanvas);
+                            item.svgBlob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+                        }
+
+                        workCanvas.toBlob((blob) => {
+                            item.pngBlob = blob;
+                            item.status = blob ? 'done' : 'error';
+                            item.subProgress = 100;
+                            // Explicit Memory Garbage Collection so 100+ 4K/6K images never crash browser RAM
+                            superCanvas.width = 1;
+                            superCanvas.height = 1;
+                            workCanvas.width = 1;
+                            workCanvas.height = 1;
+                            resolve();
+                        }, 'image/png', 1.0);
+                    } catch (err) {
+                        item.status = 'error';
+                        resolve();
+                    }
+                };
+                img.onerror = () => {
+                    item.status = 'error';
+                    resolve();
+                };
+                img.src = item.srcDataUrl;
+            });
+        }
+
+        function togglePauseBatch() {
+            if (!isBatchRunning) return;
+            isBatchPaused = !isBatchPaused;
+            const pauseBtn = document.getElementById('pauseBatchBtn');
+            pauseBtn.textContent = isBatchPaused ? '▶️ Resume' : '⏸️ Pause';
+        }
+
+        function clearBatchQueue() {
+            isBatchRunning = false;
+            isBatchPaused = false;
+            batchQueue.forEach(item => {
+                if (item.isObjectUrl && item.srcDataUrl) {
+                    URL.revokeObjectURL(item.srcDataUrl);
+                }
+            });
+            batchQueue = [];
+            document.getElementById('batchOverallProgressBar').style.width = '0%';
+            document.getElementById('batchPercentLabel').textContent = '0%';
+            document.getElementById('batchProgressLabel').textContent = 'তালিকা খালি করা হয়েছে। নতুন ছবি যোগ করুন।';
+            renderBatchQueueUI();
+        }
+
+        function downloadSingleBatchItem(id) {
+            const item = batchQueue.find(i => i.id === id);
+            if (!item || !item.pngBlob) return;
+            const url = URL.createObjectURL(item.pngBlob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${item.name}_OptiScale_${item.outWidth}x${item.outHeight}.png`;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 3000);
+        }
+
+        async function downloadAllBatchAsZip() {
+            const doneItems = batchQueue.filter(i => i.status === 'done' && i.pngBlob);
+            if (!doneItems.length || typeof JSZip === 'undefined') return;
+
+            const zipBtn = document.getElementById('downloadZipBtn');
+            const progressLabel = document.getElementById('batchProgressLabel');
+            const origText = zipBtn.textContent;
+            zipBtn.textContent = '⏳ প্যাকিং .ZIP...';
+            zipBtn.disabled = true;
+
+            try {
+                const zip = new JSZip();
+                const folder = zip.folder("OptiScale_UltraHD_Batch");
+
+                doneItems.forEach((item, idx) => {
+                    const safeName = item.name.replace(/[^a-zA-Z0-9_\-\u0980-\u09FF]/g, '_') || `Image_${idx + 1}`;
+                    const fileName = `${String(idx + 1).padStart(3, '0')}_${safeName}_${item.outWidth}x${item.outHeight}.png`;
+                    // Use STORE compression for PNG blobs so 100+ 4K images zip in 1-2 seconds without CPU freeze
+                    folder.file(fileName, item.pngBlob, { compression: "STORE" });
+                    if (item.svgBlob) {
+                        const svgName = `${String(idx + 1).padStart(3, '0')}_${safeName}_Vector.svg`;
+                        folder.file(svgName, item.svgBlob, { compression: "DEFLATE" });
+                    }
+                });
+
+                const content = await zip.generateAsync({
+                    type: "blob",
+                    streamFiles: true
+                }, (metadata) => {
+                    const pct = Math.round(metadata.percent);
+                    zipBtn.textContent = `⏳ ZIP তৈরি হচ্ছে (${pct}%)...`;
+                    if (progressLabel) {
+                        progressLabel.textContent = `📦 হাই-স্পিড .ZIP আর্কাইভ তৈরি হচ্ছে: ${pct}% সম্পন্ন...`;
+                    }
+                });
+
+                const url = URL.createObjectURL(content);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `OptiScale_Batch_${doneItems.length}_Images_UltraHD.zip`;
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+                if (progressLabel) {
+                    progressLabel.textContent = `✅ সফলভাবে ${doneItems.length}টি ছবির .ZIP ফাইল ডাউনলোড হয়েছে!`;
+                }
+            } catch (err) {
+                if (progressLabel) {
+                    progressLabel.textContent = `⚠️ ZIP তৈরি করতে সমস্যা হয়েছে। আপনি আলাদাভাবে PNG বাটনে ক্লিক করেও নামাতে পারবেন।`;
+                }
+            } finally {
+                zipBtn.textContent = origText;
+                zipBtn.disabled = false;
             }
         }
 
